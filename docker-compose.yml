@@ -45,6 +45,9 @@ services:
     build:
       context: .
       dockerfile: orchestrator/Dockerfile
+    # En Mac ARM64 (M1/M2/M3): emular x86_64 para usar wheels binarios de Open3D/PDAL
+    # En producción (x86_64 Linux) esta línea no tiene efecto — eliminar si causa problemas
+    platform: linux/amd64
     container_name: vs3d-orchestrator
     restart: unless-stopped
     depends_on:

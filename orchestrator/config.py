@@ -21,11 +21,11 @@ class Settings(BaseSettings):
         description="URL de conexión a Redis",
     )
 
-    # Cloudflare R2
-    r2_endpoint: str = Field(description="Endpoint HTTPS de Cloudflare R2")
-    r2_access_key: str = Field(description="Access Key ID de R2")
-    r2_secret_key: str = Field(description="Secret Access Key de R2")
-    r2_bucket: str = Field(description="Nombre del bucket en R2")
+    # Cloudflare R2 (opcionales — el servidor SSE no los necesita)
+    r2_endpoint: str = Field(default="", description="Endpoint HTTPS de Cloudflare R2")
+    r2_access_key: str = Field(default="", description="Access Key ID de R2")
+    r2_secret_key: str = Field(default="", description="Secret Access Key de R2")
+    r2_bucket: str = Field(default="", description="Nombre del bucket en R2")
 
     # Scheduler
     max_cpu_percent: float = Field(
