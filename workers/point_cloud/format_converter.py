@@ -112,7 +112,13 @@ def _read_to_numpy(src: Path) -> tuple[np.ndarray, np.ndarray | None, np.ndarray
         # Formato texto: X Y Z [Intensity] [R G B]
         raw = np.loadtxt(src)
         xyz = raw[:, :3].astype(np.float64)
-        colors = raw[:, 3:6].astype(np.float32) / 255.0 if raw.shape[1] >= 6 else None
+        if raw.shape[1] >= 6:
+            rgb = raw[:, 3:6].astype(np.float32)
+            # Detectar rango automáticamente: si todos los valores son ≤ 1.0
+            # ya están normalizados; si alguno supera 1.0 asumimos escala 0-255.
+            colors = rgb / 255.0 if rgb.max() > 1.0 else rgb
+        else:
+            colors = None
         return xyz, colors, None
 
     elif ext == ".ply":

@@ -93,6 +93,13 @@ def evaluate(
     return SchedulingDecision(True, "fits", utilization_score=score)
 
 
+# Límite global absoluto de subprocesos worker activos simultáneamente.
+# Independiente de los concurrency_max por tipo de tarea — protege contra
+# escenarios donde la suma de todos los concurrency_max supera lo razonable
+# (e.g. 20 image_convert + 30 image_thumbnail = 50 procesos).
+MAX_CONCURRENT_WORKERS = 50
+
+
 def pack(
     pending_tasks: list[Task],
     snapshot: ResourceSnapshot,
@@ -115,6 +122,15 @@ def pack(
     Returns:
         Lista de tareas que deben lanzarse en este ciclo.
     """
+    # Verificar límite global de concurrencia antes de empezar
+    current_total = len(already_running_types)
+    if current_total >= MAX_CONCURRENT_WORKERS:
+        logger.debug(
+            "Límite global de workers alcanzado, ciclo de scheduling vacío",
+            extra={"current": current_total, "max": MAX_CONCURRENT_WORKERS},
+        )
+        return []
+
     capacity = VirtualCapacity(
         cpu_available=snapshot.cpu_available,
         ram_available_gb=snapshot.ram_available_target_gb,
@@ -136,12 +152,17 @@ def pack(
 
     to_launch: list[Task] = []
 
+    # Cuántos workers nuevos podemos lanzar en este ciclo sin superar el cap global
+    slots_available = MAX_CONCURRENT_WORKERS - current_total
+
     # ── Pasada 1: tareas pesadas ─────────────────────────────────────
     # Para cada posición en la cola (respetando FIFO por prioridad),
     # evaluamos si cabe. Si no cabe la primera, seguimos buscando una
     # más pequeña que sí quepa (bin-packing).
     scheduled_ids = set()
     for task in heavy:
+        if len(to_launch) >= slots_available:
+            break
         decision = evaluate(task, capacity)
         if decision.can_run:
             to_launch.append(task)
@@ -164,6 +185,8 @@ def pack(
 
     # ── Pasada 2: tareas ligeras (relleno de bins) ───────────────────
     for task in light:
+        if len(to_launch) >= slots_available:
+            break
         if task.task_id in scheduled_ids:
             continue
         decision = evaluate(task, capacity)

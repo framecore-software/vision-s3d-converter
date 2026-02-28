@@ -247,25 +247,24 @@ def _compress_tar_zst(
     all_files: list[Path],
     on_progress: Callable | None,
 ) -> None:
+    """
+    Comprime src_dir en un archivo .tar.zst usando streaming de zstandard.
+    Evita cargar el TAR completo en RAM: escribe directamente a disco
+    pasando por el compresor como un stream, controlando el uso de memoria.
+    """
     import zstandard as zstd
 
     total = len(all_files)
-    # Primero crear tar en memoria temporal, luego comprimir con zstd
-    import io
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w") as tf:
-        for i, file_path in enumerate(all_files):
-            arcname = file_path.relative_to(src_dir)
-            tf.add(file_path, arcname=str(arcname))
-            if on_progress and total > 0:
-                on_progress(int(5 + (i / total) * 70), f"Empaquetando {arcname}...")
-
-    if on_progress:
-        on_progress(75, "Comprimiendo con Zstandard...")
-
     cctx = zstd.ZstdCompressor(level=3)
+
     with open(dst, "wb") as f_out:
-        f_out.write(cctx.compress(buf.getvalue()))
+        with cctx.stream_writer(f_out, closefd=False) as compressor:
+            with tarfile.open(fileobj=compressor, mode="w|") as tf:
+                for i, file_path in enumerate(all_files):
+                    arcname = file_path.relative_to(src_dir)
+                    tf.add(file_path, arcname=str(arcname))
+                    if on_progress and total > 0:
+                        on_progress(int(5 + (i / total) * 90), f"Comprimiendo {arcname}...")
 
 
 def _compress_7z(

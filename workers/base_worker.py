@@ -71,7 +71,9 @@ class BaseWorker(ABC):
 
         try:
             outputs = self.process(resume_state=resume_state)
-            self._clear_checkpoint()
+            # Nota: el checkpoint se limpia en worker_pool._wrapper() DESPUÉS
+            # de confirmar que el resultado llegó a la queue, garantizando el
+            # orden correcto: resultado_en_queue → checkpoint_limpio.
             return outputs
         except SystemExit:
             # SIGTERM recibido: guardamos checkpoint aquí, fuera del signal handler,

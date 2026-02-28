@@ -107,9 +107,18 @@ class PointCloudWorker(BaseWorker):
 
             # Thumbnail (opcional)
             if params.get("generate_thumbnails", True):
-                thumb_output = self._run_thumbnail(local_src, base_key, destination.bucket)
+                thumb_output, thumb_error = self._run_thumbnail(local_src, base_key, destination.bucket)
                 if thumb_output:
                     outputs.append(thumb_output)
+                elif thumb_error:
+                    # Registrar en los outputs que el thumbnail falló, para que
+                    # Laravel pueda informarlo al usuario sin bloquear la tarea.
+                    outputs.append(TaskOutput(
+                        type="thumbnail_error",
+                        format="",
+                        key="",
+                        metadata={"error": thumb_error},
+                    ))
 
         self.progress.report(100, "complete", "Procesamiento completado")
         return outputs
@@ -185,14 +194,20 @@ class PointCloudWorker(BaseWorker):
         ))
         return outputs
 
-    def _run_thumbnail(self, src: Path, base_key: str, bucket: str) -> TaskOutput | None:
+    def _run_thumbnail(self, src: Path, base_key: str, bucket: str) -> tuple[TaskOutput | None, str | None]:
+        """
+        Genera y sube el thumbnail. Retorna (output, None) en éxito,
+        (None, error_str) en fallo. Nunca propaga excepciones porque el
+        thumbnail es opcional y no debe bloquear el resultado principal.
+        """
         try:
             self.progress.report(92, "thumbnail", "Generando thumbnail...")
             thumb_path = self.work_path("thumbnail.webp")
             generate_thumbnail_from_point_cloud(src, thumb_path)
             dest_key = f"{base_key}/thumbnail.webp"
             r2_client.upload_file(thumb_path, dest_key, bucket, "image/webp")
-            return TaskOutput(type="thumbnail", format="webp", key=dest_key, size_bytes=thumb_path.stat().st_size)
+            return TaskOutput(type="thumbnail", format="webp", key=dest_key, size_bytes=thumb_path.stat().st_size), None
         except Exception as exc:
-            logger.warning("No se pudo generar thumbnail", exc_info=exc)
-            return None
+            error_msg = str(exc)
+            logger.warning("No se pudo generar thumbnail: %s", error_msg, extra={"task_id": self.task_id})
+            return None, error_msg

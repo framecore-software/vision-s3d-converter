@@ -82,6 +82,22 @@ class Task(BaseModel):
         if not self.webhook.progress_channel:
             self.webhook.progress_channel = f"task:{self.task_id}:progress"
 
+    def get_param(self, key: str, default: Any = None) -> Any:
+        """
+        Acceso seguro a params con default explícito.
+        Equivalente a params.get(key, default) pero deja trazabilidad en logs
+        si el param esperado no viene en el mensaje — útil para detectar
+        mensajes malformados desde Laravel sin crashear el worker.
+        """
+        if key not in self.params:
+            import logging
+            logging.getLogger(__name__).debug(
+                "Param '%s' no presente en task, usando default=%r",
+                key, default,
+                extra={"task_id": self.task_id, "task_type": self.task_type},
+            )
+        return self.params.get(key, default)
+
 
 class TaskResult(BaseModel):
     task_id: str

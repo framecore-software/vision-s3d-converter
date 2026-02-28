@@ -7,6 +7,7 @@ import os
 import queue
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
 
 from orchestrator.models.task import Task, TaskOutput, TaskType
@@ -73,8 +74,16 @@ class WorkerPool:
         result_queue: multiprocessing.Queue = self._ctx.Queue()
 
         def _wrapper(task_dict: dict, q: multiprocessing.Queue) -> None:
+            from orchestrator.config import settings
             result = worker_fn(task_dict)
+            # Poner el resultado en la queue ANTES de limpiar el checkpoint.
+            # Garantiza que si el proceso muere entre estas dos operaciones,
+            # el orchestrator recibe el resultado y no reintenta desde un
+            # checkpoint obsoleto. Orden: resultado → limpieza (no al revés).
             q.put(result)
+            if result.get("status") == "completed":
+                checkpoint = Path(settings.checkpoint_dir) / f"{task_dict['task_id']}.json"
+                checkpoint.unlink(missing_ok=True)
 
         process = self._ctx.Process(
             target=_wrapper,
