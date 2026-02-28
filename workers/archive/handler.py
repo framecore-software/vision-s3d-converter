@@ -162,6 +162,9 @@ def _extract_tar(src: Path, dst_dir: Path, on_progress: Callable | None) -> list
 
 
 def _extract_rar(src: Path, dst_dir: Path, on_progress: Callable | None) -> list[Path]:
+    # rarfile delega la descompresión al binario 'unrar' (non-free) o 'bsdtar'.
+    # Asegúrate de que esté instalado en la imagen Docker:
+    #   apt-get install -y unrar-free   (alternativa libre, soporta RAR4 y RAR5)
     import rarfile
     files: list[Path] = []
     with rarfile.RarFile(str(src)) as rf:

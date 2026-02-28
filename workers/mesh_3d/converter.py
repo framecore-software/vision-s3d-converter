@@ -7,8 +7,11 @@ import open3d as o3d
 
 logger = logging.getLogger(__name__)
 
-# Formatos soportados por Open3D
-INPUT_FORMATS  = {".obj", ".fbx", ".ply", ".glb", ".gltf", ".stl", ".off"}
+# Formatos soportados por Open3D.
+# NOTA: .fbx NO está disponible en Linux — requiere el FBX SDK propietario de Autodesk,
+# que Open3D no incluye en su build oficial para Linux. Para convertir .fbx, use
+# assimp o Blender como paso previo antes de enviar la tarea al microservicio.
+INPUT_FORMATS  = {".obj", ".ply", ".glb", ".gltf", ".stl", ".off"}
 OUTPUT_FORMATS = {".glb", ".gltf", ".ply", ".obj", ".stl"}
 
 

@@ -100,8 +100,10 @@ class Orchestrator:
         self._connection: aio_pika.abc.AbstractRobustConnection | None = None
         self._monitor = ResourceMonitor()
         self._pool = WorkerPool(on_complete=self._on_worker_complete)
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     async def start(self) -> None:
+        self._loop = asyncio.get_running_loop()
         logger.info("Iniciando orchestrator", extra={"pid": os.getpid()})
         Path(settings.checkpoint_dir).mkdir(parents=True, exist_ok=True)
         Path(settings.tmp_processing_dir).mkdir(parents=True, exist_ok=True)
@@ -158,7 +160,7 @@ class Orchestrator:
             return
 
         # 2. Tomar snapshot de recursos (bloqueante ~2s en executor para no bloquear el loop)
-        snapshot = await asyncio.get_event_loop().run_in_executor(
+        snapshot = await asyncio.get_running_loop().run_in_executor(
             None, self._monitor.refresh
         )
 
@@ -208,7 +210,7 @@ class Orchestrator:
 
         task, message = inflight
         # Scheduleamos las operaciones async desde este callback síncrono
-        asyncio.get_event_loop().call_soon_threadsafe(
+        self._loop.call_soon_threadsafe(
             lambda: asyncio.ensure_future(
                 self._finalize_task(task_id, success, outputs, error, message, task)
             )

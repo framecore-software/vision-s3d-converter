@@ -186,11 +186,36 @@ class WorkerPool:
     def is_running(self, task_id: str) -> bool:
         return task_id in self._handles
 
-    def kill(self, task_id: str) -> bool:
-        """Mata un worker específico (SIGKILL). El checkpoint ya fue guardado vía SIGTERM."""
+    def kill(self, task_id: str, sigterm_timeout: float = 10.0) -> bool:
+        """
+        Termina un worker de forma ordenada: SIGTERM → esperar → SIGKILL.
+
+        Envía SIGTERM primero para que el worker tenga oportunidad de guardar
+        su checkpoint antes de morir. Si no termina en sigterm_timeout segundos,
+        envía SIGKILL para forzar la terminación.
+        """
         handle = self._handles.get(task_id)
         if not handle:
             return False
-        logger.warning("Matando worker", extra={"task_id": task_id, "pid": handle.pid})
-        handle.process.kill()
+        if not handle.is_alive:
+            return False
+
+        logger.warning(
+            "Enviando SIGTERM a worker",
+            extra={"task_id": task_id, "pid": handle.pid},
+        )
+        try:
+            handle.process.terminate()  # SIGTERM
+        except OSError:
+            pass
+
+        handle.process.join(timeout=sigterm_timeout)
+
+        if handle.is_alive:
+            logger.warning(
+                "Worker no terminó tras SIGTERM, enviando SIGKILL",
+                extra={"task_id": task_id, "pid": handle.pid},
+            )
+            handle.process.kill()  # SIGKILL
+
         return True
