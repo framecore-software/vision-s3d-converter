@@ -43,6 +43,11 @@ def _get_client():
             config=Config(
                 signature_version="s3v4",
                 retries={"max_attempts": 3, "mode": "adaptive"},
+                # Timeout de conexión: 30s para establecer el TCP.
+                # Timeout de lectura: 300s para transferencias de archivos grandes.
+                # Sin estos timeouts, un cuelgue de red bloquea el worker para siempre.
+                connect_timeout=30,
+                read_timeout=300,
             ),
         )
     return _client

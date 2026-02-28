@@ -68,7 +68,7 @@ class PointCloudWorker(BaseWorker):
             self.save_checkpoint({"stage": stage_key, "local_src": str(local_src)})
         else:
             local_src = Path(resume_state["local_src"])
-            logger.info("Retomando: archivo ya descargado")
+            logger.debug("Retomando: archivo ya descargado")
 
         outputs: list[TaskOutput] = []
         base_key = destination.base_key.rstrip("/")

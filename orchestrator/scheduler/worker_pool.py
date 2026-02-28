@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import multiprocessing
 import multiprocessing.queues
-import os
 import queue
 import time
 from dataclasses import dataclass, field
@@ -111,7 +110,7 @@ class WorkerPool:
     # Recolectar procesos terminados
     # ─────────────────────────────────────────────
 
-    def reap(self) -> list[tuple[str, bool, list | None, str | None]]:
+    def reap(self) -> list[tuple[str, bool, list[TaskOutput] | None, str | None]]:
         """
         Recoge resultados de workers terminados y los elimina del pool.
         Retorna lista de (task_id, success, outputs, error).
@@ -148,7 +147,7 @@ class WorkerPool:
 
     def _collect_result(
         self, handle: WorkerHandle
-    ) -> tuple[str, bool, list | None, str | None]:
+    ) -> tuple[str, bool, list[TaskOutput] | None, str | None]:
         handle.process.join(timeout=5)
         try:
             result = handle.result_queue.get_nowait()

@@ -6,6 +6,7 @@ import multiprocessing
 import os
 import sys
 from collections import deque
+from pathlib import Path
 from typing import Any
 
 import aio_pika
@@ -21,7 +22,6 @@ from orchestrator.queue import rabbitmq_client, redis_client
 from orchestrator.scheduler.bin_packer import pack
 from orchestrator.scheduler.resource_monitor import ResourceMonitor
 from orchestrator.scheduler.worker_pool import WorkerPool
-from pathlib import Path
 
 # ─────────────────────────────────────────────
 # Logging estructurado
@@ -194,7 +194,7 @@ class Orchestrator:
         self,
         task_id: str,
         success: bool,
-        outputs: list | None,
+        outputs: list[TaskOutput] | None,
         error: str | None,
     ) -> None:
         """
@@ -218,7 +218,7 @@ class Orchestrator:
         self,
         task_id: str,
         success: bool,
-        outputs: list | None,
+        outputs: list[TaskOutput] | None,
         error: str | None,
         message: aio_pika.abc.AbstractIncomingMessage,
         task: Task | None = None,

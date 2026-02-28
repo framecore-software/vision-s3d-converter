@@ -63,7 +63,7 @@ class ArchiveWorker(BaseWorker):
             self.save_checkpoint({"stage": "downloaded", "local_src": str(local_src)})
         else:
             local_src = Path(resume_state["local_src"])
-            logger.info("Retomando desde checkpoint: archivo ya descargado")
+            logger.debug("Retomando desde checkpoint: archivo ya descargado")
 
         outputs: list[TaskOutput] = []
         base_key = destination.base_key.rstrip("/")

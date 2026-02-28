@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from orchestrator.models.task import TaskType
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -112,8 +115,7 @@ def get_weight(task_type: TaskType) -> TaskWeight:
     """
     weight = TASK_WEIGHTS.get(task_type)
     if weight is None:
-        import logging
-        logging.getLogger(__name__).warning(
+        logger.warning(
             "task_type sin peso definido, usando fallback conservador. "
             "Agregar '%s' en TASK_WEIGHTS.",
             task_type,

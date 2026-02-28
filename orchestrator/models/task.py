@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import logging
+import uuid
 from datetime import datetime
 from enum import StrEnum
 from typing import Any
+
 from pydantic import BaseModel, Field
-import uuid
+
+logger = logging.getLogger(__name__)
 
 
 class TaskType(StrEnum):
@@ -90,8 +94,7 @@ class Task(BaseModel):
         mensajes malformados desde Laravel sin crashear el worker.
         """
         if key not in self.params:
-            import logging
-            logging.getLogger(__name__).debug(
+            logger.debug(
                 "Param '%s' no presente en task, usando default=%r",
                 key, default,
                 extra={"task_id": self.task_id, "task_type": self.task_type},

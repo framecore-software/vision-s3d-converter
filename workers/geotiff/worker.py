@@ -58,7 +58,7 @@ class GeoTiffWorker(BaseWorker):
             self.save_checkpoint({"stage": "downloaded", "local_src": str(local_src)})
         else:
             local_src = Path(resume_state["local_src"])
-            logger.info("Retomando desde checkpoint: archivo ya descargado")
+            logger.debug("Retomando desde checkpoint: archivo ya descargado")
 
         # ── Etapa 2: Procesamiento ─────────────────────────────────────
         stem = Path(source.key).stem

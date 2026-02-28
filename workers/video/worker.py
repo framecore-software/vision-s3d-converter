@@ -58,7 +58,7 @@ class VideoWorker(BaseWorker):
             self.save_checkpoint({"stage": "downloaded", "local_src": str(local_src)})
         else:
             local_src = Path(resume_state["local_src"])
-            logger.info("Retomando desde checkpoint: video ya descargado")
+            logger.debug("Retomando desde checkpoint: video ya descargado")
 
         # ── Etapa 2: Transcodificación ─────────────────────────────────
         output_fmt = params.get("output_format", "mp4").lstrip(".")
