@@ -1,0 +1,13 @@
+-r base.txt
+
+# 7-ZIP nativo en Python
+py7zr==1.1.0
+
+# Lectura de archivos RAR
+# Requiere unrar instalado en el sistema: apt install unrar
+rarfile==4.2
+
+# Soporte .zst (Zstandard) — formato moderno de compresión
+zstandard==0.25.0
+
+# ZIP y TAR son stdlib de Python — sin dependencias adicionales

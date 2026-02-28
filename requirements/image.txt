@@ -1,0 +1,8 @@
+-r base.txt
+
+# Procesamiento de imágenes grandes (streaming por tiles, 10x menos RAM que Pillow)
+# Requiere libvips instalado en el sistema: apt install libvips-dev
+pyvips==3.1.1
+
+# Conversión de formatos (JPG, PNG, TIFF, WEBP, AVIF)
+Pillow==12.1.1

@@ -1,0 +1,5 @@
+-r base.txt
+
+# Wrapper moderno para FFmpeg (reemplaza ffmpeg-python, abandonado desde 2019)
+# Requiere ffmpeg instalado en el sistema: apt install ffmpeg
+python-ffmpeg==2.0.12

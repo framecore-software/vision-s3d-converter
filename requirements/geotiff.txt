@@ -1,0 +1,15 @@
+-r base.txt
+
+# GDAL se instala desde el sistema (imagen Docker ghcr.io/osgeo/gdal ya lo incluye)
+# NO instalar gdal desde pip — usar el del sistema para evitar conflictos
+
+# API pythónica sobre GDAL para GeoTIFF masivos
+# Instalar sin binaries para usar el GDAL del sistema Docker
+# En producción: pip install rasterio --no-binary rasterio
+rasterio==1.5.0
+
+# Cloud Optimized GeoTIFF + pirámides de tiles
+rio-cogeo==7.0.1
+
+# Pillow para thumbnails y conversiones básicas de imagen
+Pillow==12.1.1

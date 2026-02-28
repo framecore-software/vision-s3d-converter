@@ -1,0 +1,106 @@
+services:
+  rabbitmq:
+    image: rabbitmq:4.0.9-management
+    container_name: vs3d-rabbitmq
+    restart: unless-stopped
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS}
+      RABBITMQ_DEFAULT_VHOST: vision_s3d
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  redis:
+    image: redis:8.6.1
+    container_name: vs3d-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: >
+      redis-server
+      --maxmemory ${REDIS_MAXMEMORY:-4gb}
+      --maxmemory-policy allkeys-lru
+      --save 60 1000
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  orchestrator:
+    build:
+      context: .
+      dockerfile: orchestrator/Dockerfile
+    container_name: vs3d-orchestrator
+    restart: unless-stopped
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672/vision_s3d
+      REDIS_URL: redis://redis:6379
+      R2_ENDPOINT: ${R2_ENDPOINT}
+      R2_ACCESS_KEY: ${R2_ACCESS_KEY}
+      R2_SECRET_KEY: ${R2_SECRET_KEY}
+      R2_BUCKET: ${R2_BUCKET}
+      MAX_CPU_PERCENT: ${MAX_CPU_PERCENT:-85}
+      MAX_RAM_PERCENT: ${MAX_RAM_PERCENT:-85}
+      SCHEDULER_CYCLE_SECONDS: ${SCHEDULER_CYCLE_SECONDS:-2}
+      TMP_PROCESSING_DIR: /tmp/processing
+      CHECKPOINT_DIR: /app/checkpoints
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - checkpoints:/app/checkpoints
+      - ${HOST_TMP_DIR:-/tmp/vs3d_processing}:/tmp/processing
+    # Necesario para que psutil lea CPU/RAM reales del host
+    pid: host
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9090/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  progress-sse:
+    build:
+      context: .
+      dockerfile: progress/Dockerfile
+    container_name: vs3d-progress-sse
+    restart: unless-stopped
+    ports:
+      - "${SSE_PORT:-8080}:8080"
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      REDIS_URL: redis://redis:6379
+      SSE_PORT: 8080
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  rabbitmq_data:
+  redis_data:
+  checkpoints:
+
+networks:
+  default:
+    name: vision_s3d_network
