@@ -18,8 +18,15 @@ logger = logging.getLogger(__name__)
 # Nombres de exchanges y colas
 # ─────────────────────────────────────────────
 EXCHANGE_TASKS = "vision.s3d.tasks"
+EXCHANGE_TASKS_DELAYED = "vision.s3d.tasks.delayed"
 EXCHANGE_RESULTS = "vision.s3d.results"
 EXCHANGE_DLX = "vision.s3d.dlx"
+
+# Delays de backoff exponencial por intento (en ms)
+_RETRY_DELAYS_MS = {
+    2: 30_000,    # intento 2: +30s
+    3: 60_000,    # intento 3: +60s
+}
 
 QUEUE_HIGH = "tasks.high_priority"
 QUEUE_NORMAL = "tasks.normal"
@@ -50,16 +57,25 @@ async def setup_queues(channel: aio_pika.abc.AbstractChannel) -> None:
     # Dead Letter Exchange (recibe mensajes rechazados definitivamente)
     dlx = await channel.declare_exchange(EXCHANGE_DLX, aio_pika.ExchangeType.DIRECT, durable=True)
 
-    # Dead Letter Queue
+    # Dead Letter Queue (TTL 7 días — Laravel consumer la supervisa)
     dlq = await channel.declare_queue(
         QUEUE_DLQ,
         durable=True,
-        arguments={"x-message-ttl": 604_800_000},  # 7 días
+        arguments={"x-message-ttl": 604_800_000},
     )
     await dlq.bind(dlx, routing_key="dead")
 
     # Exchange principal de tareas (topic — permite routing por task_type)
     tasks_exchange = await channel.declare_exchange(EXCHANGE_TASKS, aio_pika.ExchangeType.TOPIC, durable=True)
+
+    # Exchange delayed para reintentos con backoff exponencial
+    # Requiere el plugin rabbitmq_delayed_message_exchange
+    delayed_exchange = await channel.declare_exchange(
+        EXCHANGE_TASKS_DELAYED,
+        aio_pika.ExchangeType.X_DELAYED_MESSAGE,
+        durable=True,
+        arguments={"x-delayed-type": "topic"},
+    )
 
     # Exchange de resultados (direct)
     await channel.declare_exchange(EXCHANGE_RESULTS, aio_pika.ExchangeType.DIRECT, durable=True)
@@ -71,9 +87,9 @@ async def setup_queues(channel: aio_pika.abc.AbstractChannel) -> None:
 
     # Colas de tareas con DLX configurado
     queue_configs = [
-        (QUEUE_HIGH, "tasks.high.*", 86_400_000),    # 24h TTL
-        (QUEUE_NORMAL, "tasks.normal.*", 43_200_000), # 12h TTL
-        (QUEUE_LIGHT, "tasks.light.*", 21_600_000),   # 6h TTL
+        (QUEUE_HIGH,   "tasks.high.*",   86_400_000),    # 24h TTL
+        (QUEUE_NORMAL, "tasks.normal.*", 43_200_000),    # 12h TTL
+        (QUEUE_LIGHT,  "tasks.light.*",  21_600_000),    # 6h TTL
     ]
 
     for queue_name, routing_key, ttl_ms in queue_configs:
@@ -87,6 +103,8 @@ async def setup_queues(channel: aio_pika.abc.AbstractChannel) -> None:
             },
         )
         await q.bind(tasks_exchange, routing_key=routing_key)
+        # El delayed exchange enruta a las mismas colas tras el delay
+        await q.bind(delayed_exchange, routing_key=routing_key)
 
     logger.info("RabbitMQ: exchanges y colas declarados correctamente")
 
@@ -109,6 +127,70 @@ async def publish_task(connection: aio_pika.abc.AbstractConnection, task: Task) 
         )
         await exchange.publish(message, routing_key=routing_key)
         logger.info("Tarea publicada", extra={"task_id": task.task_id, "task_type": task.task_type})
+
+
+# ─────────────────────────────────────────────
+# Publicar reintento con backoff exponencial
+# ─────────────────────────────────────────────
+
+async def publish_retry(
+    connection: aio_pika.abc.AbstractConnection,
+    task: Task,
+    error: str,
+) -> bool:
+    """
+    Republicar una tarea fallida con backoff exponencial usando el delayed exchange.
+
+    Returns:
+        True si se programó el reintento, False si se agotaron los intentos (→ DLQ).
+    """
+    next_attempt = task.retry.attempt + 1
+
+    if next_attempt > task.retry.max_attempts:
+        logger.warning(
+            "Tarea agotó reintentos, enviando a DLQ",
+            extra={"task_id": task.task_id, "attempts": task.retry.attempt},
+        )
+        async with connection.channel() as channel:
+            dlx = await channel.get_exchange(EXCHANGE_DLX)
+            body = task.model_dump_json().encode()
+            msg = aio_pika.Message(
+                body=body,
+                delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+                content_type="application/json",
+                headers={"x-death-reason": error, "x-final-attempt": task.retry.attempt},
+            )
+            await dlx.publish(msg, routing_key="dead")
+        return False
+
+    delay_ms = _RETRY_DELAYS_MS.get(next_attempt, 120_000)
+    task.retry.attempt = next_attempt
+    task.retry.previous_error = error
+
+    async with connection.channel() as channel:
+        delayed_exchange = await channel.get_exchange(EXCHANGE_TASKS_DELAYED)
+        queue_name = queue_for_task(task.task_type)
+        routing_key = queue_name.replace("tasks.", "tasks.") + f".{task.task_type}"
+
+        body = task.model_dump_json().encode()
+        msg = aio_pika.Message(
+            body=body,
+            delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+            content_type="application/json",
+            headers={"x-delay": delay_ms},
+        )
+        await delayed_exchange.publish(msg, routing_key=routing_key)
+
+    logger.info(
+        "Reintento programado",
+        extra={
+            "task_id":    task.task_id,
+            "attempt":    next_attempt,
+            "delay_ms":   delay_ms,
+            "task_type":  task.task_type,
+        },
+    )
+    return True
 
 
 # ─────────────────────────────────────────────
