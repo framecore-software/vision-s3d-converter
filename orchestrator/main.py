@@ -58,6 +58,15 @@ def _run_worker_subprocess(task_dict: dict) -> dict:
     if task.task_type in (TaskType.IMAGE_CONVERT, TaskType.IMAGE_THUMBNAIL):
         from workers.image.worker import ImageWorker
         worker = ImageWorker(task)
+
+    elif task.task_type in (TaskType.POINT_CLOUD_LOD, TaskType.POINT_CLOUD_CONVERT):
+        from workers.point_cloud.worker import PointCloudWorker
+        worker = PointCloudWorker(task)
+
+    elif task.task_type in (TaskType.MESH_3D_LOD, TaskType.MESH_3D_CONVERT):
+        from workers.mesh_3d.worker import Mesh3DWorker
+        worker = Mesh3DWorker(task)
+
     else:
         return {"status": "failed", "error": f"Worker no implementado: {task.task_type}"}
 
@@ -226,7 +235,14 @@ class Orchestrator:
 
     @staticmethod
     def _is_supported(task_type: TaskType) -> bool:
-        return task_type in (TaskType.IMAGE_CONVERT, TaskType.IMAGE_THUMBNAIL)
+        return task_type in (
+            TaskType.IMAGE_CONVERT,
+            TaskType.IMAGE_THUMBNAIL,
+            TaskType.POINT_CLOUD_LOD,
+            TaskType.POINT_CLOUD_CONVERT,
+            TaskType.MESH_3D_LOD,
+            TaskType.MESH_3D_CONVERT,
+        )
 
 
 # ─────────────────────────────────────────────

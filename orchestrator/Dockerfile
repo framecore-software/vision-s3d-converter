@@ -49,6 +49,11 @@ COPY requirements/archive.txt requirements/archive.txt
 RUN pip install --no-cache-dir -r requirements/video.txt \
     && pip install --no-cache-dir -r requirements/archive.txt
 
+# Nubes de puntos — la más pesada (Open3D ~1.5GB, PDAL + deps)
+# Se instala al final para no invalidar caché en cambios de código
+COPY requirements/point_cloud.txt requirements/point_cloud.txt
+RUN pip install --no-cache-dir -r requirements/point_cloud.txt
+
 # Copiar código fuente
 COPY orchestrator/ orchestrator/
 COPY workers/ workers/
