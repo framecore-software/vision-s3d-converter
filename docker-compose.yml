@@ -1,6 +1,9 @@
 services:
   rabbitmq:
-    image: rabbitmq:4.0.9-management
+    build:
+      context: ./rabbitmq
+      dockerfile: Dockerfile
+    image: vs3d-rabbitmq:4.0.9
     container_name: vs3d-rabbitmq
     restart: unless-stopped
     ports:
@@ -8,7 +11,6 @@ services:
       - "15672:15672"
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
-      - ./rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS}
