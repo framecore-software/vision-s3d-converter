@@ -47,7 +47,11 @@ def get_video_metadata(src: Path) -> dict:
 
     vs = video_streams[0]
     fps_parts = vs.get("r_frame_rate", "30/1").split("/")
-    fps = float(fps_parts[0]) / float(fps_parts[1]) if len(fps_parts) == 2 else 30.0
+    try:
+        num, den = float(fps_parts[0]), float(fps_parts[1]) if len(fps_parts) == 2 else 1.0
+        fps = num / den if den != 0 else 30.0
+    except (ValueError, IndexError):
+        fps = 30.0
 
     return {
         "duration_seconds": float(probe["format"].get("duration", 0)),
@@ -152,46 +156,21 @@ def _transcode_video(
     if fps:
         filters.append(f"fps={fps}")
 
-    stream = ffmpeg.input(str(src))
-    video = stream.video
-    audio = stream.audio
-
-    kwargs: dict = {
-        "vcodec":  video_codec,
-        "crf":     crf,
-        "preset":  preset,
-        "movflags": "+faststart",  # Para streaming web
-    }
-
-    if filters:
-        video = video.filter_multi_output("fps", fps=fps) if fps and not scale_filter else video
-        video = ffmpeg.filter(video, "scale", **{}) if False else video
-        # Aplicar filtros como vf string
-        kwargs["vf"] = ",".join(filters)
-
-    if audio_codec:
-        kwargs["acodec"] = audio_codec
-
     if on_progress:
         on_progress(10, "Transcodificando video...")
 
-    out = ffmpeg.output(stream.video, stream.audio if audio_codec else stream.video, str(dst), **kwargs)
-
-    # Construir comando final con filtros opcionales
-    input_stream = ffmpeg.input(str(src))
     output_kwargs: dict = {
         "vcodec":   video_codec,
         "crf":      str(crf),
         "preset":   preset,
-        "movflags": "+faststart",
+        "movflags": "+faststart",  # Para streaming web
     }
     if audio_codec:
         output_kwargs["acodec"] = audio_codec
     if filters:
         output_kwargs["vf"] = ",".join(filters)
 
-    cmd = ffmpeg.input(str(src)).output(str(dst), **output_kwargs).overwrite_output()
-    cmd.run(quiet=True)
+    ffmpeg.input(str(src)).output(str(dst), **output_kwargs).overwrite_output().run(quiet=True)
 
 
 def _transcode_to_gif(

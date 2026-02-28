@@ -35,9 +35,14 @@ class ProgressReporter:
 
     Rate-limited a 1 mensaje cada MIN_INTERVAL segundos para no saturar
     el canal. El progreso al 100% siempre se envía inmediatamente.
+
+    Si Redis falla de forma persistente (>= _REDIS_FAIL_THRESHOLD fallos
+    consecutivos), escala el log de WARNING a ERROR para que el sistema
+    de monitoreo pueda detectarlo.
     """
 
-    MIN_INTERVAL = 2.0  # segundos entre mensajes de progreso
+    MIN_INTERVAL = 2.0         # segundos entre mensajes de progreso
+    _REDIS_FAIL_THRESHOLD = 3  # fallos consecutivos antes de emitir ERROR
 
     def __init__(self, task_id: str, tenant_id: str, file_id: str, channel: str) -> None:
         self.task_id = task_id
@@ -45,6 +50,7 @@ class ProgressReporter:
         self.file_id = file_id
         self.channel = channel
         self._last_report: float = 0.0
+        self._redis_fail_count: int = 0
 
     def report(
         self,
@@ -81,16 +87,7 @@ class ProgressReporter:
         }
 
         serialized = json.dumps(payload)
-
-        try:
-            client = _get_client()
-            client.publish(self.channel, serialized)
-            # Persistir último estado para reconexiones (TTL 1 hora)
-            client.setex(f"task:{self.task_id}:last_progress", 3600, serialized)
-        except Exception as exc:
-            # El progreso no es crítico — si Redis falla, el procesamiento continúa
-            logger.warning("No se pudo publicar progreso en Redis", exc_info=exc)
-
+        self._publish(serialized, ttl=3600)
         self._last_report = now
 
     def error(self, stage: str, error_message: str) -> None:
@@ -104,9 +101,32 @@ class ProgressReporter:
             "progress": {"percent": 0, "stage": stage, "stage_label": error_message},
         }
         serialized = json.dumps(payload)
+        self._publish(serialized, ttl=300)
+
+    def _publish(self, serialized: str, ttl: int) -> None:
+        """
+        Envía el mensaje a Redis. El procesamiento continúa aunque Redis falle,
+        pero si los fallos son persistentes se escala a ERROR para visibilidad
+        en sistemas de monitoreo.
+        """
         try:
             client = _get_client()
             client.publish(self.channel, serialized)
-            client.setex(f"task:{self.task_id}:last_progress", 300, serialized)
+            client.setex(f"task:{self.task_id}:last_progress", ttl, serialized)
+            self._redis_fail_count = 0  # reset en éxito
         except Exception as exc:
-            logger.warning("No se pudo publicar error en Redis", exc_info=exc)
+            self._redis_fail_count += 1
+            if self._redis_fail_count >= self._REDIS_FAIL_THRESHOLD:
+                logger.error(
+                    "Redis no disponible: progreso no está llegando al frontend "
+                    "(%d fallos consecutivos)",
+                    self._redis_fail_count,
+                    exc_info=exc,
+                    extra={"task_id": self.task_id},
+                )
+            else:
+                logger.warning(
+                    "No se pudo publicar progreso en Redis",
+                    exc_info=exc,
+                    extra={"task_id": self.task_id},
+                )

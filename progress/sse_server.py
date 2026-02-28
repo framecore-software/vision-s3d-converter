@@ -62,13 +62,23 @@ async def progress_stream(task_id: str, request: Request) -> StreamingResponse:
 
 async def _sse_generator(task_id: str, request: Request) -> AsyncGenerator[str, None]:
     # Enviar último estado conocido inmediatamente al conectar (reconexión)
-    last = await get_last_progress(task_id)
-    if last:
-        yield f"data: {last}\n\n"
+    try:
+        last = await get_last_progress(task_id)
+        if last:
+            yield f"data: {last}\n\n"
+    except Exception:
+        logger.warning("No se pudo obtener último progreso de Redis", extra={"task_id": task_id})
 
-    client = await get_client()
-    pubsub = client.pubsub()
-    await pubsub.subscribe(f"task:{task_id}:progress")
+    try:
+        client = await get_client()
+        pubsub = client.pubsub()
+        await pubsub.subscribe(f"task:{task_id}:progress")
+    except Exception:
+        logger.error("No se pudo conectar a Redis para SSE", extra={"task_id": task_id})
+        # Enviar error al cliente y cerrar el stream en lugar de sillar
+        error_payload = json.dumps({"task_id": task_id, "status": "error", "detail": "progress_unavailable"})
+        yield f"data: {error_payload}\n\n"
+        return
 
     try:
         while True:
@@ -76,7 +86,13 @@ async def _sse_generator(task_id: str, request: Request) -> AsyncGenerator[str, 
             if await request.is_disconnected():
                 break
 
-            message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+            try:
+                message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+            except Exception:
+                logger.warning("Error leyendo mensaje de Redis Pub/Sub", extra={"task_id": task_id})
+                await asyncio.sleep(1.0)
+                continue
+
             if message and message["type"] == "message":
                 data = message["data"]
                 yield f"data: {data}\n\n"
@@ -91,8 +107,11 @@ async def _sse_generator(task_id: str, request: Request) -> AsyncGenerator[str, 
 
             await asyncio.sleep(0.1)
     finally:
-        await pubsub.unsubscribe(f"task:{task_id}:progress")
-        await pubsub.aclose()
+        try:
+            await pubsub.unsubscribe(f"task:{task_id}:progress")
+            await pubsub.aclose()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

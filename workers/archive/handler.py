@@ -119,12 +119,28 @@ def _detect_suffix(src: Path) -> str:
     return src.suffix.lower()
 
 
+def _assert_safe_path(dst_dir: Path, member_name: str) -> None:
+    """
+    Verifica que la ruta del miembro no escape del directorio destino.
+    Protege contra ataques de path traversal ('../../etc/passwd', etc.)
+    en archivos comprimidos de fuentes no confiables.
+    Lanza ValueError si la ruta es insegura.
+    """
+    target = (dst_dir / member_name).resolve()
+    if not target.is_relative_to(dst_dir.resolve()):
+        raise ValueError(
+            f"Ruta insegura detectada en archivo comprimido: {member_name!r}. "
+            "El archivo podría ser malicioso."
+        )
+
+
 def _extract_zip(src: Path, dst_dir: Path, on_progress: Callable | None) -> list[Path]:
     files: list[Path] = []
     with zipfile.ZipFile(src, "r") as zf:
         members = zf.namelist()
         total = len(members)
         for i, member in enumerate(members):
+            _assert_safe_path(dst_dir, member)
             zf.extract(member, dst_dir)
             files.append(Path(member))
             if on_progress and total > 0:
@@ -152,6 +168,7 @@ def _extract_rar(src: Path, dst_dir: Path, on_progress: Callable | None) -> list
         members = rf.infolist()
         total = len(members)
         for i, member in enumerate(members):
+            _assert_safe_path(dst_dir, member.filename)
             rf.extract(member, str(dst_dir))
             files.append(Path(member.filename))
             if on_progress and total > 0:

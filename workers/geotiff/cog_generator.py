@@ -42,10 +42,23 @@ def generate_cog(
             on_progress(pct, label)
 
     dst.parent.mkdir(parents=True, exist_ok=True)
-    overview_levels = overview_levels or [2, 4, 8, 16, 32, 64]
+
+    if overview_levels is None:
+        # Calcular niveles apropiados según las dimensiones reales de la imagen.
+        # No tiene sentido generar un overview 64x si la imagen tiene 256px de lado.
+        import rasterio
+        with rasterio.open(src) as ds:
+            min_dim = min(ds.width, ds.height)
+        # Incluir solo niveles donde la dimensión resultante >= 256px
+        overview_levels = [2 ** i for i in range(1, 7) if min_dim // (2 ** i) >= 256]
+        if not overview_levels:
+            overview_levels = [2]  # mínimo un overview
 
     _progress(5, "Generando COG con pirámides...")
-    logger.info("Generando COG", extra={"src": src.name, "profile": profile})
+    logger.info(
+        "Generando COG",
+        extra={"src": src.name, "profile": profile, "overview_levels": overview_levels},
+    )
 
     cog_profile = cog_profiles.get(profile)
     if cog_profile is None:

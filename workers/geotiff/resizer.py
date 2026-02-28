@@ -66,6 +66,8 @@ def resize(
 
         # ── Calcular dimensiones de salida ───────────────────────────
         if scale_factor is not None:
+            if scale_factor <= 0:
+                raise ValueError(f"scale_factor debe ser > 0, recibido: {scale_factor}")
             out_width  = max(1, int(orig_width  * scale_factor))
             out_height = max(1, int(orig_height * scale_factor))
         elif target_width and target_height:
