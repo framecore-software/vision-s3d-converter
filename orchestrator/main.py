@@ -5,21 +5,23 @@ import logging
 import multiprocessing
 import os
 import sys
-import time
-from pathlib import Path
+from collections import deque
 from typing import Any
 
 import aio_pika
 import aio_pika.abc
 import structlog
+import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
-import uvicorn
 
 from orchestrator.config import settings
-from orchestrator.models.task import Task, TaskResult, TaskStatus, TaskType
+from orchestrator.models.task import Task, TaskOutput, TaskType
 from orchestrator.queue import rabbitmq_client, redis_client
-from orchestrator.queue.rabbitmq_client import publish_result
+from orchestrator.scheduler.bin_packer import pack
+from orchestrator.scheduler.resource_monitor import ResourceMonitor
+from orchestrator.scheduler.worker_pool import WorkerPool
+from pathlib import Path
 
 # ─────────────────────────────────────────────
 # Logging estructurado
@@ -41,53 +43,42 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
 # ─────────────────────────────────────────────
 # Registro de workers disponibles
 # ─────────────────────────────────────────────
 
-def _get_worker_class(task_type: TaskType):
-    """Retorna la clase worker correspondiente al tipo de tarea."""
-    if task_type in (TaskType.IMAGE_CONVERT, TaskType.IMAGE_THUMBNAIL):
-        from workers.image.worker import ImageWorker
-        return ImageWorker
-    # Fase 4+: agregar aquí los demás workers
-    raise NotImplementedError(f"Worker no implementado para: {task_type}")
-
-
-# ─────────────────────────────────────────────
-# Ejecución de worker en subproceso
-# ─────────────────────────────────────────────
-
 def _run_worker_subprocess(task_dict: dict) -> dict:
     """
-    Función que corre en el subproceso hijo.
-    Importa el worker, lo ejecuta y retorna el resultado serializado.
+    Corre en el subproceso hijo.
+    Importa el worker correcto, lo ejecuta y devuelve el resultado.
     """
     task = Task.model_validate(task_dict)
-    worker_class = _get_worker_class(task.task_type)
-    worker = worker_class(task)
+
+    if task.task_type in (TaskType.IMAGE_CONVERT, TaskType.IMAGE_THUMBNAIL):
+        from workers.image.worker import ImageWorker
+        worker = ImageWorker(task)
+    else:
+        return {"status": "failed", "error": f"Worker no implementado: {task.task_type}"}
 
     try:
         outputs = worker.run()
-        return {
-            "status": "completed",
-            "outputs": [o.model_dump() for o in outputs],
-        }
+        return {"status": "completed", "outputs": [o.model_dump() for o in outputs]}
     except Exception as exc:
-        return {
-            "status": "failed",
-            "error": str(exc),
-        }
+        return {"status": "failed", "error": str(exc)}
 
 
 # ─────────────────────────────────────────────
-# Orchestrator principal
+# Orchestrator
 # ─────────────────────────────────────────────
 
 class Orchestrator:
     def __init__(self) -> None:
-        self._active_processes: dict[str, multiprocessing.Process] = {}
+        self._pending: deque[tuple[Task, aio_pika.abc.AbstractIncomingMessage]] = deque()
+        self._inflight: dict[str, aio_pika.abc.AbstractIncomingMessage] = {}
         self._connection: aio_pika.abc.AbstractRobustConnection | None = None
+        self._monitor = ResourceMonitor()
+        self._pool = WorkerPool(on_complete=self._on_worker_complete)
 
     async def start(self) -> None:
         logger.info("Iniciando orchestrator", extra={"pid": os.getpid()})
@@ -95,107 +86,151 @@ class Orchestrator:
         Path(settings.tmp_processing_dir).mkdir(parents=True, exist_ok=True)
 
         self._connection = await rabbitmq_client.connect()
-        await rabbitmq_client.consume_tasks(self._connection, self._handle_task)
+        await rabbitmq_client.consume_tasks(self._connection, self._enqueue_task)
         logger.info("Orchestrator listo, esperando tareas")
 
-        # Mantener el proceso vivo
+        # Loop principal del scheduler
         while True:
-            await asyncio.sleep(5)
-            self._reap_finished_processes()
+            await self._scheduler_cycle()
+            await asyncio.sleep(settings.scheduler_cycle_seconds)
 
-    async def _handle_task(
+    # ─────────────────────────────────────────────
+    # Recepción de mensajes desde RabbitMQ
+    # ─────────────────────────────────────────────
+
+    async def _enqueue_task(
         self,
         task: Task,
         message: aio_pika.abc.AbstractIncomingMessage,
     ) -> None:
         """
-        Recibe una tarea de RabbitMQ y lanza un subproceso para procesarla.
-        El ACK se hace cuando el subproceso termina exitosamente.
+        Recibe un mensaje de RabbitMQ y lo encola localmente.
+        NO hace ACK todavía — el ACK se hace después de que el worker termina.
         """
-        logger.info(
-            "Tarea recibida",
-            extra={"task_id": task.task_id, "task_type": task.task_type, "tenant_id": task.tenant_id},
-        )
-
-        # Verificar que el tipo de tarea está soportado
-        try:
-            _get_worker_class(task.task_type)
-        except NotImplementedError:
-            logger.warning("Tipo de tarea no soportado aún", extra={"task_type": task.task_type})
-            await message.nack(requeue=True)  # Requeue para cuando esté implementado
+        if not self._is_supported(task.task_type):
+            logger.warning(
+                "Tipo de tarea no soportado aún, requeue",
+                extra={"task_type": task.task_type},
+            )
+            await message.nack(requeue=True)
             return
 
-        # Lanzar worker en subproceso aislado
-        ctx = multiprocessing.get_context("spawn")
-        result_queue: multiprocessing.Queue = ctx.Queue()
-
-        def _worker_wrapper(task_dict: dict, q: multiprocessing.Queue) -> None:
-            result = _run_worker_subprocess(task_dict)
-            q.put(result)
-
-        process = ctx.Process(
-            target=_worker_wrapper,
-            args=(task.model_dump(mode="json"), result_queue),
-            daemon=False,
-            name=f"worker-{task.task_id[:8]}",
+        self._pending.append((task, message))
+        logger.info(
+            "Tarea encolada",
+            extra={
+                "task_id": task.task_id,
+                "task_type": task.task_type,
+                "queue_length": len(self._pending),
+            },
         )
-        process.start()
-        logger.info("Worker lanzado", extra={"task_id": task.task_id, "pid": process.pid})
 
-        # Esperar resultado de forma async sin bloquear el event loop
-        result = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: result_queue.get(timeout=7200)  # 2h max
+    # ─────────────────────────────────────────────
+    # Ciclo del scheduler (corre cada N segundos)
+    # ─────────────────────────────────────────────
+
+    async def _scheduler_cycle(self) -> None:
+        # 1. Recoger workers terminados y procesar sus resultados
+        self._pool.reap()
+
+        if not self._pending:
+            return
+
+        # 2. Tomar snapshot de recursos (bloqueante ~2s en executor para no bloquear el loop)
+        snapshot = await asyncio.get_event_loop().run_in_executor(
+            None, self._monitor.refresh
         )
-        process.join()
 
-        # Publicar resultado y hacer ACK/NACK
+        # 3. Decidir qué tareas lanzar con el bin-packer
+        pending_tasks = [task for task, _ in self._pending]
+        to_launch = pack(
+            pending_tasks=pending_tasks,
+            snapshot=snapshot,
+            already_running_types=self._pool.active_task_types(),
+        )
+
+        if not to_launch:
+            return
+
+        # 4. Lanzar los workers seleccionados
+        launch_ids = {t.task_id for t in to_launch}
+        new_pending: deque = deque()
+
+        for task, message in self._pending:
+            if task.task_id in launch_ids:
+                self._inflight[task.task_id] = message
+                self._pool.launch(task, _run_worker_subprocess)
+            else:
+                new_pending.append((task, message))
+
+        self._pending = new_pending
+
+    # ─────────────────────────────────────────────
+    # Callback: worker terminado
+    # ─────────────────────────────────────────────
+
+    def _on_worker_complete(
+        self,
+        task_id: str,
+        success: bool,
+        outputs: list | None,
+        error: str | None,
+    ) -> None:
+        """
+        Llamado por WorkerPool cuando un subproceso termina.
+        Publica el resultado y hace ACK/NACK en RabbitMQ.
+        """
+        message = self._inflight.pop(task_id, None)
+        if message is None:
+            logger.error("Mensaje no encontrado para task_id", extra={"task_id": task_id})
+            return
+
+        # Scheduleamos las operaciones async desde este callback síncrono
+        asyncio.get_event_loop().call_soon_threadsafe(
+            lambda: asyncio.ensure_future(
+                self._finalize_task(task_id, success, outputs, error, message)
+            )
+        )
+
+    async def _finalize_task(
+        self,
+        task_id: str,
+        success: bool,
+        outputs: list | None,
+        error: str | None,
+        message: aio_pika.abc.AbstractIncomingMessage,
+    ) -> None:
         async with self._connection.channel() as channel:
-            if result["status"] == "completed":
-                await publish_result(channel, {
-                    "task_id": task.task_id,
-                    "tenant_id": task.tenant_id,
-                    "file_id": task.file_id,
+            if success:
+                await rabbitmq_client.publish_result(channel, {
+                    "task_id": task_id,
                     "status": "completed",
-                    "outputs": result["outputs"],
+                    "outputs": outputs or [],
                 })
                 await message.ack()
-                logger.info("Tarea completada", extra={"task_id": task.task_id})
+                logger.info("Tarea completada y confirmada", extra={"task_id": task_id})
             else:
-                attempt = task.retry.attempt
-                max_attempts = task.retry.max_attempts
+                # Buscar la tarea original en inflight ya no sirve (fue removida),
+                # pero el mensaje tiene los headers de retry de RabbitMQ
+                await rabbitmq_client.publish_result(channel, {
+                    "task_id": task_id,
+                    "status": "failed",
+                    "error": error,
+                })
+                await message.ack()
+                logger.error("Tarea fallida notificada", extra={"task_id": task_id, "error": error})
 
-                if attempt < max_attempts:
-                    # Republicar con attempt+1 para reintento
-                    task.retry.attempt += 1
-                    task.retry.previous_error = result.get("error", "unknown")
-                    await rabbitmq_client.publish_task(self._connection, task)
-                    logger.warning(
-                        "Tarea fallida, reintentando",
-                        extra={"task_id": task.task_id, "attempt": attempt + 1},
-                    )
-                else:
-                    logger.error(
-                        "Tarea fallida definitivamente, enviando a DLQ",
-                        extra={"task_id": task.task_id, "error": result.get("error")},
-                    )
-                    await publish_result(channel, {
-                        "task_id": task.task_id,
-                        "tenant_id": task.tenant_id,
-                        "file_id": task.file_id,
-                        "status": "failed",
-                        "error": result.get("error"),
-                    })
+    # ─────────────────────────────────────────────
+    # Helpers
+    # ─────────────────────────────────────────────
 
-                await message.ack()  # ACK para evitar requeue infinito desde RabbitMQ
-
-    def _reap_finished_processes(self) -> None:
-        finished = [pid for pid, p in self._active_processes.items() if not p.is_alive()]
-        for pid in finished:
-            del self._active_processes[pid]
+    @staticmethod
+    def _is_supported(task_type: TaskType) -> bool:
+        return task_type in (TaskType.IMAGE_CONVERT, TaskType.IMAGE_THUMBNAIL)
 
 
 # ─────────────────────────────────────────────
-# Health check endpoint (FastAPI mínimo)
+# Health check endpoint
 # ─────────────────────────────────────────────
 
 health_app = FastAPI(title="vs3d-orchestrator-health")
@@ -218,7 +253,6 @@ async def health() -> JSONResponse:
 async def _main() -> None:
     orchestrator = Orchestrator()
 
-    # Correr health server y orchestrator concurrentemente
     health_config = uvicorn.Config(
         health_app,
         host="0.0.0.0",
