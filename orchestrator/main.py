@@ -67,6 +67,18 @@ def _run_worker_subprocess(task_dict: dict) -> dict:
         from workers.mesh_3d.worker import Mesh3DWorker
         worker = Mesh3DWorker(task)
 
+    elif task.task_type in (TaskType.GEOTIFF_RESIZE, TaskType.GEOTIFF_COG):
+        from workers.geotiff.worker import GeoTiffWorker
+        worker = GeoTiffWorker(task)
+
+    elif task.task_type == TaskType.VIDEO_TRANSCODE:
+        from workers.video.worker import VideoWorker
+        worker = VideoWorker(task)
+
+    elif task.task_type in (TaskType.ARCHIVE_COMPRESS, TaskType.ARCHIVE_EXTRACT):
+        from workers.archive.worker import ArchiveWorker
+        worker = ArchiveWorker(task)
+
     else:
         return {"status": "failed", "error": f"Worker no implementado: {task.task_type}"}
 
@@ -242,6 +254,11 @@ class Orchestrator:
             TaskType.POINT_CLOUD_CONVERT,
             TaskType.MESH_3D_LOD,
             TaskType.MESH_3D_CONVERT,
+            TaskType.GEOTIFF_RESIZE,
+            TaskType.GEOTIFF_COG,
+            TaskType.VIDEO_TRANSCODE,
+            TaskType.ARCHIVE_COMPRESS,
+            TaskType.ARCHIVE_EXTRACT,
         )
 
 
