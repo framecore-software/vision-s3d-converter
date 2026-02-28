@@ -30,7 +30,7 @@ app.add_middleware(
 @app.get("/health")
 async def health() -> JSONResponse:
     try:
-        client = get_client()
+        client = await get_client()
         await client.ping()
         return JSONResponse({"status": "ok"})
     except Exception:
@@ -66,7 +66,7 @@ async def _sse_generator(task_id: str, request: Request) -> AsyncGenerator[str, 
     if last:
         yield f"data: {last}\n\n"
 
-    client = get_client()
+    client = await get_client()
     pubsub = client.pubsub()
     await pubsub.subscribe(f"task:{task_id}:progress")
 

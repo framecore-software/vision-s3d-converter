@@ -74,7 +74,14 @@ class BaseWorker(ABC):
             self._clear_checkpoint()
             return outputs
         except SystemExit:
-            # SIGTERM recibido, checkpoint ya guardado en _handle_sigterm
+            # SIGTERM recibido: guardamos checkpoint aquí, fuera del signal handler,
+            # para hacer el I/O de forma segura.
+            if self._terminated:
+                logger.warning("SIGTERM recibido, guardando checkpoint", extra={"task_id": self.task_id})
+                try:
+                    self.save_checkpoint({"stage": "interrupted", "reason": "sigterm"})
+                except Exception:
+                    logger.exception("No se pudo guardar checkpoint tras SIGTERM", extra={"task_id": self.task_id})
             raise
         except Exception:
             logger.exception("Error en worker", extra={"task_id": self.task_id})
@@ -97,7 +104,13 @@ class BaseWorker(ABC):
     # ─────────────────────────────────────────────
 
     def save_checkpoint(self, state: dict[str, Any]) -> None:
-        """Persiste el estado actual en disco para poder retomar si el worker muere."""
+        """
+        Persiste el estado actual en disco para poder retomar si el worker muere.
+
+        Usa escritura atómica (write a .tmp + os.replace) para garantizar que
+        el archivo de checkpoint nunca quede en estado truncado o corrupto,
+        incluso si SIGTERM llega durante la escritura.
+        """
         checkpoint = {
             "task_id": self.task_id,
             "task_type": self.task.task_type,
@@ -105,7 +118,9 @@ class BaseWorker(ABC):
             "saved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "elapsed_seconds": time.monotonic() - self._start_time,
         }
-        self._checkpoint_path.write_text(json.dumps(checkpoint, indent=2))
+        tmp_path = self._checkpoint_path.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(checkpoint, indent=2))
+        os.replace(tmp_path, self._checkpoint_path)  # atomic on POSIX
         logger.debug("Checkpoint guardado", extra={"task_id": self.task_id, "stage": state.get("stage")})
 
     def _load_checkpoint(self) -> dict[str, Any] | None:
@@ -146,7 +161,9 @@ class BaseWorker(ABC):
     # ─────────────────────────────────────────────
 
     def _handle_sigterm(self, signum: int, frame: Any) -> None:
-        logger.warning("SIGTERM recibido, guardando checkpoint", extra={"task_id": self.task_id})
+        # El handler de señal debe ser mínimo para evitar deadlocks o corrupción
+        # si la señal llega durante una operación de I/O.
+        # Solo seteamos el flag y lanzamos SystemExit; el I/O (save_checkpoint)
+        # se hace en el except SystemExit de run(), fuera del contexto de señal.
         self._terminated = True
-        self.save_checkpoint({"stage": "interrupted", "reason": "sigterm"})
         raise SystemExit(0)

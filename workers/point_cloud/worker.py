@@ -94,7 +94,9 @@ class PointCloudWorker(BaseWorker):
             outputs.extend(lod_outputs)
 
             # Tiles 3D (opcional)
-            if params.get("generate_tiles", True) and resume_state and resume_state.get("stage") != "tiles_done":
+            # Se generan si: la tarea lo pide Y aún no están hechos (stage != "tiles_done")
+            tiles_already_done = resume_state is not None and resume_state.get("stage") == "tiles_done"
+            if params.get("generate_tiles", True) and not tiles_already_done:
                 tile_outputs = self._run_tiles(local_src, base_key, destination.bucket, params)
                 outputs.extend(tile_outputs)
                 self.save_checkpoint({
@@ -102,9 +104,6 @@ class PointCloudWorker(BaseWorker):
                     "local_src": str(local_src),
                     "lod_outputs": [o.model_dump() for o in lod_outputs],
                 })
-            elif params.get("generate_tiles", True) and not resume_state:
-                tile_outputs = self._run_tiles(local_src, base_key, destination.bucket, params)
-                outputs.extend(tile_outputs)
 
             # Thumbnail (opcional)
             if params.get("generate_thumbnails", True):

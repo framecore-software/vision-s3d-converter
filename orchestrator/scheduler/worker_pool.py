@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import logging
 import multiprocessing
+import multiprocessing.queues
 import os
+import queue
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -141,10 +143,11 @@ class WorkerPool:
         handle.process.join(timeout=5)
         try:
             result = handle.result_queue.get_nowait()
-        except Exception:
+        except queue.Empty:
+            # El proceso terminó sin poner nada en la cola (crash, OOM, etc.)
             exit_code = handle.process.exitcode
             error = f"Worker terminó sin resultado (exit code {exit_code})"
-            logger.error(error, extra={"task_id": handle.task_id})
+            logger.error(error, extra={"task_id": handle.task_id, "exit_code": exit_code})
             return handle.task_id, False, None, error
 
         if result.get("status") == "completed":

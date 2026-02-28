@@ -99,14 +99,29 @@ TASK_WEIGHTS: dict[TaskType, TaskWeight] = {
 }
 
 
+# Peso conservador para tipos de tarea no registrados.
+# Evita crashear el scheduler; la tarea se trata como moderadamente costosa.
+_FALLBACK_WEIGHT = TaskWeight(cpu_percent=50, ram_gb=8, concurrency_max=1)
+
+
 def get_weight(task_type: TaskType) -> TaskWeight:
-    """Retorna el peso de un tipo de tarea. Lanza KeyError si no está registrado."""
-    try:
-        return TASK_WEIGHTS[task_type]
-    except KeyError:
-        raise KeyError(f"Sin peso definido para task_type='{task_type}'. Agregar en TASK_WEIGHTS.")
+    """
+    Retorna el peso de un tipo de tarea.
+    Si el tipo no está registrado retorna un peso conservador de fallback
+    en lugar de crashear el scheduler.
+    """
+    weight = TASK_WEIGHTS.get(task_type)
+    if weight is None:
+        import logging
+        logging.getLogger(__name__).warning(
+            "task_type sin peso definido, usando fallback conservador. "
+            "Agregar '%s' en TASK_WEIGHTS.",
+            task_type,
+        )
+        return _FALLBACK_WEIGHT
+    return weight
 
 
 def is_heavy(task_type: TaskType) -> bool:
     """Considera 'pesada' cualquier tarea que usa ≥ 30% de CPU."""
-    return TASK_WEIGHTS[task_type].cpu_percent >= 30
+    return get_weight(task_type).cpu_percent >= 30
