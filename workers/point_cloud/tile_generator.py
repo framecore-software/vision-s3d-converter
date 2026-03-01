@@ -90,10 +90,11 @@ def generate_thumbnail_from_point_cloud(
     on_progress: Callable[[int, str], None] | None = None,
 ) -> Path:
     """
-    Genera una imagen WebP de vista aérea de la nube de puntos usando Open3D.
-    Usa el nivel de preview (50K puntos) para que sea rápido.
+    Genera una imagen WebP de vista aérea de la nube de puntos.
+
+    Usa Open3D OffscreenRenderer (no requiere display X11) con fallback a
+    matplotlib si el renderer offscreen no está disponible en el entorno.
     """
-    import open3d as o3d
     from PIL import Image
 
     if on_progress:
@@ -102,29 +103,76 @@ def generate_thumbnail_from_point_cloud(
     las = laspy.read(src)
     xyz = np.vstack([las.x, las.y, las.z]).T.astype(np.float64)
 
-    # Submuestrear si hay demasiados puntos para el thumbnail
+    # Submuestrear a 50 K puntos para que sea rápido independiente del tamaño
     if len(xyz) > 50_000:
         idx = np.random.choice(len(xyz), 50_000, replace=False)
         xyz = xyz[idx]
 
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(xyz)
-
-    # Renderizado offscreen (requiere Open3D con soporte de rendering headless)
-    vis = o3d.visualization.Visualizer()
-    vis.create_window(visible=False, width=width, height=height)
-    vis.add_geometry(pcd)
-    vis.poll_events()
-    vis.update_renderer()
-
-    img_array = np.asarray(vis.capture_screen_float_buffer(do_render=True))
-    vis.destroy_window()
-
     dst.parent.mkdir(parents=True, exist_ok=True)
-    img = Image.fromarray((img_array * 255).astype(np.uint8))
+
+    try:
+        img_array = _render_offscreen(xyz, width, height)
+    except Exception as exc:
+        logger.warning(
+            "OffscreenRenderer falló, usando fallback matplotlib: %s", exc
+        )
+        img_array = _render_matplotlib(xyz, width, height)
+
+    img = Image.fromarray(img_array)
     img.save(str(dst), format="WEBP", quality=80)
 
     if on_progress:
         on_progress(100, "Thumbnail generado")
 
     return dst
+
+
+def _render_offscreen(xyz: np.ndarray, width: int, height: int) -> np.ndarray:
+    """Renderiza la nube de puntos usando Open3D OffscreenRenderer (headless-safe)."""
+    import open3d as o3d
+
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(xyz)
+    pcd.paint_uniform_color([0.4, 0.7, 1.0])
+
+    renderer = o3d.visualization.rendering.OffscreenRenderer(width, height)
+    renderer.scene.set_background([0.1, 0.1, 0.1, 1.0])
+
+    mat = o3d.visualization.rendering.MaterialRecord()
+    mat.shader = "defaultUnlit"
+    mat.point_size = 2.0
+    renderer.scene.add_geometry("pcd", pcd, mat)
+
+    # Vista cenital (top-down)
+    bounds = pcd.get_axis_aligned_bounding_box()
+    center = bounds.get_center()
+    extent = bounds.get_extent()
+    eye = center + np.array([0, 0, max(extent) * 1.5])
+    renderer.setup_camera(60.0, center, eye, [0, 1, 0])
+
+    img = renderer.render_to_image()
+    return np.asarray(img)
+
+
+def _render_matplotlib(xyz: np.ndarray, width: int, height: int) -> np.ndarray:
+    """Fallback: proyección aérea 2D con matplotlib (sin dependencias de GPU/display)."""
+    import matplotlib
+    matplotlib.use("Agg")  # backend sin display
+    import matplotlib.pyplot as plt
+
+    dpi = 100
+    fig, ax = plt.subplots(figsize=(width / dpi, height / dpi), dpi=dpi)
+    ax.set_facecolor("#1a1a1a")
+    fig.patch.set_facecolor("#1a1a1a")
+
+    # Vista superior: X vs Y, color por densidad
+    ax.scatter(xyz[:, 0], xyz[:, 1], s=0.3, c="#66b3ff", alpha=0.5, linewidths=0)
+    ax.set_aspect("equal")
+    ax.axis("off")
+    fig.tight_layout(pad=0)
+
+    fig.canvas.draw()
+    buf = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+    buf = buf.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+    plt.close(fig)
+    return buf

@@ -64,6 +64,13 @@ def resize(
         profile     = dataset.profile.copy()
         band_count  = dataset.count
 
+        if crs is None:
+            logger.warning(
+                "GeoTIFF sin CRS definido; el archivo de salida tampoco tendrá "
+                "georeferenciación. Considera reproyectar antes de procesar.",
+                extra={"src": src.name},
+            )
+
         # ── Calcular dimensiones de salida ───────────────────────────
         if scale_factor is not None:
             if scale_factor <= 0:

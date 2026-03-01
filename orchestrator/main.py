@@ -289,17 +289,35 @@ health_app = FastAPI(title="vs3d-orchestrator-health")
 _orchestrator: Orchestrator | None = None
 
 
+async def _rabbitmq_ok() -> bool:
+    """Verifica conectividad con RabbitMQ intentando abrir un canal."""
+    try:
+        conn = await aio_pika.connect_robust(
+            settings.rabbitmq_url,
+            timeout=3,
+        )
+        await conn.close()
+        return True
+    except Exception:
+        return False
+
+
 @health_app.get("/health")
 async def health() -> JSONResponse:
     import psutil
 
-    redis_ok = await redis_client.ping()
+    redis_ok, rmq_ok = await asyncio.gather(
+        redis_client.ping(),
+        _rabbitmq_ok(),
+    )
     cpu_pct = psutil.cpu_percent(interval=None)
     mem = psutil.virtual_memory()
 
+    all_ok = redis_ok and rmq_ok
     payload: dict = {
-        "status":        "ok" if redis_ok else "degraded",
+        "status":        "ok" if all_ok else "degraded",
         "redis":         redis_ok,
+        "rabbitmq":      rmq_ok,
         "pid":           os.getpid(),
         "cpu_percent":   cpu_pct,
         "ram_percent":   mem.percent,
@@ -312,7 +330,7 @@ async def health() -> JSONResponse:
         payload["inflight_tasks"] = len(_orchestrator._inflight)
         payload["worker_count"]   = len(_orchestrator._pool._handles)
 
-    http_code = 200 if redis_ok else 503
+    http_code = 200 if all_ok else 503
     return JSONResponse(payload, status_code=http_code)
 
 

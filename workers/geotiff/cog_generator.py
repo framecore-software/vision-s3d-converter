@@ -48,6 +48,12 @@ def generate_cog(
         # No tiene sentido generar un overview 64x si la imagen tiene 256px de lado.
         import rasterio
         with rasterio.open(src) as ds:
+            if ds.crs is None:
+                logger.warning(
+                    "GeoTIFF sin CRS definido; el COG generado no tendrá "
+                    "georeferenciación. Considera reproyectar antes de procesar.",
+                    extra={"src": src.name},
+                )
             min_dim = min(ds.width, ds.height)
         # Incluir solo niveles donde la dimensión resultante >= 256px
         overview_levels = [2 ** i for i in range(1, 7) if min_dim // (2 ** i) >= 256]

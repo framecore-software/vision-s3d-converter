@@ -56,6 +56,16 @@ class Settings(BaseSettings):
         description="Directorio para checkpoints de tareas largas",
     )
 
+    # Seguridad en extracción de archivos comprimidos
+    archive_max_extracted_gb: float = Field(
+        default=50.0,
+        ge=1.0,
+        description=(
+            "Límite máximo de datos extraídos en GB. Protege contra ZIP-bombs. "
+            "La extracción falla si el tamaño acumulado supera este valor."
+        ),
+    )
+
     # Servidor de salud
     health_port: int = Field(
         default=9090,

@@ -24,15 +24,27 @@ def extract(
     src: Path,
     dst_dir: Path,
     on_progress: Callable[[int, str], None] | None = None,
+    max_extracted_bytes: int | None = None,
 ) -> dict:
     """
     Extrae un archivo comprimido en dst_dir.
 
     Soporta: ZIP, TAR (gz/bz2/xz/zst), RAR, 7ZIP, .zst (solo archivo).
 
+    Args:
+        max_extracted_bytes: Si se especifica, la extracción falla con ValueError
+            si el tamaño acumulado de los archivos extraídos supera este límite.
+            Protege contra ataques ZIP-bomb. Por defecto se toma de la configuración
+            (ARCHIVE_MAX_EXTRACTED_GB, default 50 GB).
+
     Returns:
         Dict con extracted_files (lista de rutas relativas), total_size_bytes.
     """
+    from orchestrator.config import settings
+
+    if max_extracted_bytes is None:
+        max_extracted_bytes = int(settings.archive_max_extracted_gb * 1024 ** 3)
+
     dst_dir.mkdir(parents=True, exist_ok=True)
     suffix = _detect_suffix(src)
 
@@ -40,15 +52,15 @@ def extract(
         on_progress(5, f"Extrayendo {src.name}...")
 
     if suffix in _ZIP_EXTS:
-        files = _extract_zip(src, dst_dir, on_progress)
+        files = _extract_zip(src, dst_dir, on_progress, max_extracted_bytes)
     elif suffix in _TAR_EXTS:
-        files = _extract_tar(src, dst_dir, on_progress)
+        files = _extract_tar(src, dst_dir, on_progress, max_extracted_bytes)
     elif suffix in _RAR_EXTS:
-        files = _extract_rar(src, dst_dir, on_progress)
+        files = _extract_rar(src, dst_dir, on_progress, max_extracted_bytes)
     elif suffix in _SEVENZ_EXTS:
-        files = _extract_7z(src, dst_dir, on_progress)
+        files = _extract_7z(src, dst_dir, on_progress, max_extracted_bytes)
     elif suffix in _ZST_EXTS:
-        files = _extract_zst(src, dst_dir, on_progress)
+        files = _extract_zst(src, dst_dir, on_progress, max_extracted_bytes)
     else:
         raise ValueError(f"Formato no soportado para extracción: {suffix}")
 
@@ -61,6 +73,22 @@ def extract(
 
     logger.info("Extracción completada", extra={"src": src.name, "files": len(files)})
     return {"extracted_files": [str(f) for f in files], "total_size_bytes": total_size}
+
+
+def _check_size_limit(dst_dir: Path, extracted_bytes: int, max_bytes: int) -> int:
+    """
+    Suma el tamaño real del archivo recién extraído y verifica el límite acumulado.
+    Retorna el nuevo total acumulado.
+    Lanza ValueError si se supera el límite (protección ZIP-bomb).
+    """
+    current_total = sum(f.stat().st_size for f in dst_dir.rglob("*") if f.is_file())
+    if current_total > max_bytes:
+        limit_gb = max_bytes / 1024 ** 3
+        raise ValueError(
+            f"Extracción abortada: el tamaño extraído supera el límite de {limit_gb:.1f} GB. "
+            "El archivo comprimido podría ser un ZIP-bomb."
+        )
+    return current_total
 
 
 def compress(
@@ -134,7 +162,7 @@ def _assert_safe_path(dst_dir: Path, member_name: str) -> None:
         )
 
 
-def _extract_zip(src: Path, dst_dir: Path, on_progress: Callable | None) -> list[Path]:
+def _extract_zip(src: Path, dst_dir: Path, on_progress: Callable | None, max_bytes: int) -> list[Path]:
     files: list[Path] = []
     with zipfile.ZipFile(src, "r") as zf:
         members = zf.namelist()
@@ -143,12 +171,13 @@ def _extract_zip(src: Path, dst_dir: Path, on_progress: Callable | None) -> list
             _assert_safe_path(dst_dir, member)
             zf.extract(member, dst_dir)
             files.append(Path(member))
+            _check_size_limit(dst_dir, 0, max_bytes)
             if on_progress and total > 0:
                 on_progress(int(5 + (i / total) * 90), f"Extrayendo {member}...")
     return files
 
 
-def _extract_tar(src: Path, dst_dir: Path, on_progress: Callable | None) -> list[Path]:
+def _extract_tar(src: Path, dst_dir: Path, on_progress: Callable | None, max_bytes: int) -> list[Path]:
     files: list[Path] = []
     with tarfile.open(src, "r:*") as tf:
         members = tf.getmembers()
@@ -156,12 +185,13 @@ def _extract_tar(src: Path, dst_dir: Path, on_progress: Callable | None) -> list
         for i, member in enumerate(members):
             tf.extract(member, dst_dir, filter="data")
             files.append(Path(member.name))
+            _check_size_limit(dst_dir, 0, max_bytes)
             if on_progress and total > 0:
                 on_progress(int(5 + (i / total) * 90), f"Extrayendo {member.name}...")
     return files
 
 
-def _extract_rar(src: Path, dst_dir: Path, on_progress: Callable | None) -> list[Path]:
+def _extract_rar(src: Path, dst_dir: Path, on_progress: Callable | None, max_bytes: int) -> list[Path]:
     # rarfile delega la descompresión al binario 'unrar' (non-free) o 'bsdtar'.
     # Asegúrate de que esté instalado en la imagen Docker:
     #   apt-get install -y unrar-free   (alternativa libre, soporta RAR4 y RAR5)
@@ -174,12 +204,13 @@ def _extract_rar(src: Path, dst_dir: Path, on_progress: Callable | None) -> list
             _assert_safe_path(dst_dir, member.filename)
             rf.extract(member, str(dst_dir))
             files.append(Path(member.filename))
+            _check_size_limit(dst_dir, 0, max_bytes)
             if on_progress and total > 0:
                 on_progress(int(5 + (i / total) * 90), f"Extrayendo {member.filename}...")
     return files
 
 
-def _extract_7z(src: Path, dst_dir: Path, on_progress: Callable | None) -> list[Path]:
+def _extract_7z(src: Path, dst_dir: Path, on_progress: Callable | None, max_bytes: int) -> list[Path]:
     import py7zr
     files: list[Path] = []
     with py7zr.SevenZipFile(str(src), mode="r") as zf:
@@ -188,13 +219,14 @@ def _extract_7z(src: Path, dst_dir: Path, on_progress: Callable | None) -> list[
         if on_progress:
             on_progress(10, f"Extrayendo {total} archivos 7-Zip...")
         zf.extractall(path=str(dst_dir))
+        _check_size_limit(dst_dir, 0, max_bytes)
         files = [Path(n) for n in names]
         if on_progress:
             on_progress(90, "Archivos 7-Zip extraídos")
     return files
 
 
-def _extract_zst(src: Path, dst_dir: Path, on_progress: Callable | None) -> list[Path]:
+def _extract_zst(src: Path, dst_dir: Path, on_progress: Callable | None, max_bytes: int) -> list[Path]:
     """Descomprime un archivo .zst (archivo único sin tar)."""
     import zstandard as zstd
     out_name = src.stem  # e.g. "archivo.tar" si era .tar.zst (pero eso va por _extract_tar)
@@ -204,6 +236,7 @@ def _extract_zst(src: Path, dst_dir: Path, on_progress: Callable | None) -> list
     with open(src, "rb") as f_in, open(out_path, "wb") as f_out:
         dctx = zstd.ZstdDecompressor()
         dctx.copy_stream(f_in, f_out)
+    _check_size_limit(dst_dir, 0, max_bytes)
     if on_progress:
         on_progress(90, "Archivo Zstandard descomprimido")
     return [Path(out_name)]
