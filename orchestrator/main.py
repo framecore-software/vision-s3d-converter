@@ -4,6 +4,7 @@ import asyncio
 import logging
 import multiprocessing
 import os
+import signal
 import sys
 from collections import deque
 from pathlib import Path
@@ -94,6 +95,10 @@ def _run_worker_subprocess(task_dict: dict) -> dict:
 # ─────────────────────────────────────────────
 
 class Orchestrator:
+    # Tiempo máximo de espera (segundos) para que los workers in-flight terminen
+    # antes de forzar el cierre durante un graceful shutdown.
+    DRAIN_TIMEOUT_SECONDS = 1_800  # 30 minutos
+
     def __init__(self) -> None:
         self._pending: deque[tuple[Task, aio_pika.abc.AbstractIncomingMessage]] = deque()
         self._inflight: dict[str, tuple[Task, aio_pika.abc.AbstractIncomingMessage]] = {}
@@ -101,6 +106,7 @@ class Orchestrator:
         self._monitor = ResourceMonitor()
         self._pool = WorkerPool(on_complete=self._on_worker_complete)
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._shutting_down = False
 
     async def start(self) -> None:
         self._loop = asyncio.get_running_loop()
@@ -113,9 +119,53 @@ class Orchestrator:
         logger.info("Orchestrator listo, esperando tareas")
 
         # Loop principal del scheduler
-        while True:
+        while not self._shutting_down:
             await self._scheduler_cycle()
             await asyncio.sleep(settings.scheduler_cycle_seconds)
+
+        logger.info("Scheduler detenido, iniciando drenado de workers in-flight")
+
+    async def shutdown(self, drain_timeout: float = DRAIN_TIMEOUT_SECONDS) -> None:
+        """
+        Graceful shutdown del orchestrator.
+
+        1. Marca _shutting_down para que el scheduler deje de lanzar nuevas tareas.
+        2. Nackea con requeue los mensajes pendientes (no iniciados) para que otro
+           consumer o el próximo reinicio los tome.
+        3. Espera hasta drain_timeout segundos a que los workers in-flight terminen.
+        4. Cierra la conexión RabbitMQ.
+        """
+        self._shutting_down = True
+        logger.info(
+            "Graceful shutdown iniciado",
+            extra={"inflight": len(self._inflight), "pending": len(self._pending)},
+        )
+
+        # Reencolar mensajes pendientes que aún no empezaron a procesarse
+        for task, message in self._pending:
+            try:
+                await message.nack(requeue=True)
+                logger.debug("Mensaje pendiente requeue", extra={"task_id": task.task_id})
+            except Exception:
+                pass
+        self._pending.clear()
+
+        # Esperar a que los workers in-flight terminen
+        deadline = asyncio.get_running_loop().time() + drain_timeout
+        while self._inflight:
+            self._pool.reap()
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                logger.warning(
+                    "Drain timeout alcanzado, %d workers aún activos",
+                    len(self._inflight),
+                )
+                break
+            await asyncio.sleep(min(1.0, remaining))
+
+        if self._connection and not self._connection.is_closed:
+            await self._connection.close()
+            logger.info("Conexión RabbitMQ cerrada")
 
     # ─────────────────────────────────────────────
     # Recepción de mensajes desde RabbitMQ
@@ -376,10 +426,45 @@ async def _main() -> None:
     )
     health_server = uvicorn.Server(health_config)
 
-    await asyncio.gather(
-        orchestrator.start(),
-        health_server.serve(),
+    loop = asyncio.get_running_loop()
+    shutdown_event = asyncio.Event()
+
+    def _on_shutdown_signal(sig: int) -> None:
+        if shutdown_event.is_set():
+            return  # segunda señal: ignorar, ya estamos apagando
+        sig_name = signal.Signals(sig).name
+        logger.info("Señal %s recibida, iniciando graceful shutdown", sig_name)
+        shutdown_event.set()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, _on_shutdown_signal, sig)
+
+    # Lanzar el orchestrator y el servidor de salud en paralelo.
+    # Cuando llega la señal de shutdown, esperamos el drenado y luego
+    # pedimos a uvicorn que pare.
+    orchestrator_task = asyncio.create_task(orchestrator.start())
+    health_task = asyncio.create_task(health_server.serve())
+
+    # Esperar a que llegue la señal de apagado o a que alguna tarea falle
+    done, pending = await asyncio.wait(
+        {orchestrator_task, health_task, asyncio.create_task(shutdown_event.wait())},
+        return_when=asyncio.FIRST_COMPLETED,
     )
+
+    # Si llegamos aquí por la señal de shutdown (o por error), iniciar el cierre
+    if not orchestrator_task.done():
+        await orchestrator.shutdown()
+        orchestrator_task.cancel()
+        try:
+            await orchestrator_task
+        except asyncio.CancelledError:
+            pass
+
+    if not health_task.done():
+        health_server.should_exit = True
+        await health_task
+
+    logger.info("Orchestrator apagado correctamente")
 
 
 if __name__ == "__main__":
